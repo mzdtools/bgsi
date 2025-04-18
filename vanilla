@@ -515,7 +515,7 @@ end
 
 -- Your bounce loop coordinates
 local startPos = Vector3.new(36, 15973, 42)
-local bounceTarget = Vector3.new(40, 245, 123)
+local bounceTarget = Vector3.new(40, 1245, 123)
 
 -- Apply start position
 root.CFrame = CFrame.new(startPos)
