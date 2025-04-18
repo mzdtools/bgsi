@@ -1,0 +1,535 @@
+------------------------------------------------
+-- Global Memory Cleanup Thread (Every 30 Seconds)
+------------------------------------------------
+task.spawn(function()
+    while true do
+        task.wait(30)
+        pcall(function() collectgarbage() end)
+    end
+end)
+
+------------------------------------------------
+-- DELTA EXECUTOR PATCHES
+------------------------------------------------
+do
+    -- Override print and warn to suppress ALL messages
+    local originalPrint = print
+    local originalWarn = warn
+    
+    print = function() end
+    warn = function() end
+    
+    -- Suppress error output
+    local oldError = error
+    error = function() end
+end
+
+------------------------------------------------
+-- PREVENT ASSET LOADING ERRORS
+------------------------------------------------
+pcall(function()
+    local metatable = getrawmetatable(game)
+    local old_newindex = metatable.__newindex
+    setreadonly(metatable, false)
+    
+    metatable.__newindex = newcclosure(function(instance, property, value)
+        if property == "SoundId" and type(value) == "string" and value:find("rbxassetid://2538152777") then
+            return
+        end
+        return old_newindex(instance, property, value)
+    end)
+    
+    pcall(function()
+        for _, sound in pairs(game:GetDescendants()) do
+            if sound:IsA("Sound") and sound.SoundId == "rbxassetid://2538152777" then
+                sound.SoundId = ""
+                sound.Volume = 0
+                sound.Playing = false
+            end
+        end
+    end)
+    
+    game.DescendantAdded:Connect(function(desc)
+        if desc:IsA("Sound") and desc.SoundId == "rbxassetid://2538152777" then
+            desc.SoundId = ""
+            desc.Volume = 0
+        end
+    end)
+end)
+
+------------------------------------------------
+-- PATCH: Fix Chunker Update to Sanitize NaN values 
+------------------------------------------------
+pcall(function()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Utils = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Utils")
+    local ChunkerModule = Utils:FindFirstChild("Chunker")
+    if ChunkerModule and ChunkerModule:IsA("ModuleScript") then
+        local Chunker = require(ChunkerModule)
+        if typeof(Chunker) == "table" and typeof(Chunker.Update) == "function" then
+            local originalUpdate = Chunker.Update
+            Chunker.Update = function(...)
+                local args = {...}
+                for i, v in ipairs(args) do
+                    if typeof(v) == "number" then
+                        if v ~= v or v == math.huge or v == -math.huge then
+                            args[i] = 0
+                        end
+                    end
+                end
+                local success, result = pcall(function()
+                    return originalUpdate(unpack(args))
+                end)
+                return result
+            end
+        end
+    end
+end)
+
+------------------------------------------------
+-- OPTIONAL: Heartbeat Safety Check for Player's Position 
+------------------------------------------------
+local RunService = game:GetService("RunService")
+RunService.Heartbeat:Connect(function()
+    local player = game.Players.LocalPlayer
+    if player and player.Character then
+        local root = player.Character:FindFirstChild("HumanoidRootPart")
+        if root then
+            local pos = root.Position
+            if pos.X ~= pos.X or pos.Y ~= pos.Y or pos.Z ~= pos.Z or
+               math.abs(pos.X) > 1e8 or math.abs(pos.Y) > 1e8 or math.abs(pos.Z) > 1e8 then
+                root.CFrame = CFrame.new(0, 10, 0)
+            end
+        end
+    end
+end)
+
+------------------------------------------------
+-- PATCH: Override Physics.updateHeadHit 
+------------------------------------------------
+pcall(function()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Client = ReplicatedStorage:FindFirstChild("Client")
+    if Client then
+        local Effects = Client:FindFirstChild("Effects")
+        if Effects then
+            local PhysicsModuleScript = Effects:FindFirstChild("Physics")
+            if PhysicsModuleScript and PhysicsModuleScript:IsA("ModuleScript") then
+                local Physics = require(PhysicsModuleScript)
+                if Physics and type(Physics.updateHeadHit) == "function" then
+                    local originalUpdateHeadHit = Physics.updateHeadHit
+                    Physics.updateHeadHit = function(...)
+                        local args = {...}
+                        for i, v in ipairs(args) do
+                            if type(v) == "number" and (v == math.huge or v == -math.huge) then
+                                args[i] = 1024
+                            end
+                        end
+                        return originalUpdateHeadHit(unpack(args))
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Silent Bubble Disabler
+local function silentBubbleDisabler()
+    local replicatedStorage = game:GetService("ReplicatedStorage")
+    if not replicatedStorage then return end
+    
+    local client = replicatedStorage:FindFirstChild("Client")
+    if not client then return end
+    
+    local effects = client:FindFirstChild("Effects")
+    if not effects then return end
+    
+    local bubble = effects:FindFirstChild("Bubble")
+    if not bubble then return end
+    
+    if bubble:IsA("ModuleScript") then
+        local dummyModule = Instance.new("ModuleScript")
+        dummyModule.Source = [[
+            return {
+                new = function() return nil end,
+                Update = function() return nil end,
+                Render = function() return nil end,
+                Create = function() return nil end
+            }
+        ]]
+        dummyModule.Name = bubble.Name
+        bubble.Name = bubble.Name.."_Original"
+        dummyModule.Parent = effects
+    end
+    
+    if bubble:IsA("Script") or bubble:IsA("LocalScript") then
+        bubble.Disabled = true
+    end
+    
+    local hookFunction = hookfunction or detour_function
+    if hookFunction then
+        if bubble:IsA("ModuleScript") then
+            local bubbleModule = require(bubble)
+            if typeof(bubbleModule) == "table" then
+                if typeof(bubbleModule.Update) == "function" then
+                    hookFunction(bubbleModule.Update, function() return end)
+                end
+                
+                if typeof(bubbleModule.Render) == "function" then
+                    hookFunction(bubbleModule.Render, function() return end)
+                end
+                
+                if typeof(bubbleModule.new) == "function" then
+                    hookFunction(bubbleModule.new, function() return {
+                        Update = function() return end,
+                        Render = function() return end,
+                        Destroy = function() return end
+                    } end)
+                end
+            end
+        end
+    end
+    
+    for _, v in pairs(workspace:GetDescendants()) do
+        if v.Name == "Bubble" or v.Name:match("Bubble") then
+            pcall(function() v:Destroy() end)
+        end
+    end
+    
+    if workspace:FindFirstChild("Rendered") then
+        local rendered = workspace.Rendered
+        local fakeBubbles = Instance.new("Folder")
+        fakeBubbles.Name = "Bubbles"
+        fakeBubbles.Parent = rendered
+    end
+    
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        local args = {...}
+        
+        if method == "FindFirstChild" and self == workspace.Rendered and args[1] == "Bubbles" then
+            return fakeBubbles or nil
+        end
+        
+        return oldNamecall(self, ...)
+    end)
+end
+
+pcall(silentBubbleDisabler)
+
+pcall(function()
+    local fakeUpdate = function() return end
+    local path = "ReplicatedStorage.Client.Effects.Bubble"
+    local parts = string.split(path, ".")
+    local current = game
+    
+    for i, part in ipairs(parts) do
+        current = current:FindFirstChild(part)
+        if not current then return false end
+    end
+    
+    if current and current:IsA("ModuleScript") then
+        local old_require = require
+        require = function(module)
+            if module == current then
+                return {
+                    Update = fakeUpdate,
+                    Render = fakeUpdate,
+                    new = function() 
+                        return {
+                            Update = fakeUpdate,
+                            Render = fakeUpdate,
+                            Destroy = fakeUpdate
+                        }
+                    end
+                }
+            end
+            return old_require(module)
+        end
+        return true
+    end
+    return false
+end)
+
+------------------------------------------------
+-- HANDLE SOUND ERRORS
+------------------------------------------------
+task.spawn(function()
+    local soundId = "rbxassetid://2538152777"
+    
+    local function silenceSound(instance)
+        if instance:IsA("Sound") and instance.SoundId == soundId then
+            instance.SoundId = ""
+            instance.Volume = 0
+            instance.Playing = false
+        end
+    end
+    
+    for _, v in pairs(game:GetDescendants()) do
+        silenceSound(v)
+    end
+    
+    game.DescendantAdded:Connect(silenceSound)
+end)
+
+------------------------------------------------
+-- CREATE SETTINGS IF THEY DON'T EXIST
+------------------------------------------------
+-- Create settings table if it doesn't exist
+if not getgenv then
+    getgenv = function() return _G end
+end
+
+if not getgenv().mzd then
+    getgenv().mzd = {}
+end
+
+if not getgenv().mzd.bubbleSim then
+    getgenv().mzd.bubbleSim = {
+        enabled = true,
+        blowSpeed = 3,
+        blowDelay = 0.05,
+        sellTimeout = 0.8,
+        collectCoins = true,
+        blowAndSell = true
+    }
+end
+
+------------------------------------------------
+-- MAIN SCRIPT
+------------------------------------------------
+task.spawn(function()
+    local player = game.Players.LocalPlayer
+    
+    -- Cache common references
+    local remoteEvent = game.ReplicatedStorage
+        :WaitForChild("Shared")
+        :WaitForChild("Framework")
+        :WaitForChild("Network")
+        :WaitForChild("Remote")
+        :WaitForChild("Event")
+        
+    local coinRemote = game.ReplicatedStorage:WaitForChild("Remotes")
+        :WaitForChild("Pickups")
+        :WaitForChild("CollectPickup")
+    
+    -- Wait for leaderstats
+    local leaderstats, bubblesStat
+    local success, err = pcall(function()
+        leaderstats = player:WaitForChild("leaderstats", 10)
+        bubblesStat = leaderstats:WaitForChild("🟣 Bubbles", 10)
+    end)
+    
+    if not success or not bubblesStat then
+        return
+    end
+    
+    ------------------------------------------------
+    -- COIN COLLECTION SYSTEM
+    ------------------------------------------------
+    local collectedCoins = {}
+    
+    local function isCoinModel(model)
+        if not model:IsA("Model") then return false end
+        local name = model.Name
+        if #name ~= 36 then return false end
+        return name:match("^[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+$") ~= nil
+    end
+    
+    local function collectCoin(coin)
+        if isCoinModel(coin) and not collectedCoins[coin.Name] then
+            collectedCoins[coin.Name] = true
+            
+            -- Attempt to collect the coin
+            pcall(function() coinRemote:FireServer(coin.Name) end)
+            
+            -- Wait a very short time
+            task.wait(0.01)
+            
+            -- Destroy the coin if it still exists
+            pcall(function()
+                if coin and coin.Parent then
+                    coin:Destroy()
+                end
+            end)
+        end
+    end
+    
+    -- Scan for coins
+    local function collectAllCoins()
+        if not getgenv().mzd.bubbleSim.enabled or not getgenv().mzd.bubbleSim.collectCoins then
+            return 0
+        end
+        
+        local coinList = {}
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if isCoinModel(obj) then
+                table.insert(coinList, obj)
+            end
+        end
+        
+        -- Process coins in batches
+        for i, coin in ipairs(coinList) do
+            collectCoin(coin)
+            
+            -- Process in small batches to maintain performance
+            if i % 10 == 0 then
+                task.wait()
+            end
+        end
+        
+        return #coinList
+    end
+    
+    -- Setup new coin detection
+    workspace.DescendantAdded:Connect(function(desc)
+        if getgenv().mzd.bubbleSim.enabled and getgenv().mzd.bubbleSim.collectCoins and isCoinModel(desc) then
+            collectCoin(desc)
+        end
+    end)
+    
+    -- Periodic coin collection
+    task.spawn(function()
+        while true do
+            if getgenv().mzd.bubbleSim.enabled and getgenv().mzd.bubbleSim.collectCoins then
+                collectAllCoins()
+            end
+            task.wait(15)
+        end
+    end)
+    
+    -- Clear coin tracking periodically
+    task.spawn(function()
+        while true do
+            task.wait(60)
+            table.clear(collectedCoins)
+        end
+    end)
+    
+    ------------------------------------------------
+    -- BUBBLE BLOWING SYSTEM
+    ------------------------------------------------
+    local function blowBubbles()
+        -- Dynamic bubble blowing based on settings
+        for _ = 1, getgenv().mzd.bubbleSim.blowSpeed do
+            remoteEvent:FireServer("BlowBubble")
+        end
+    end
+    
+    local function blowUntilFull()
+        if not getgenv().mzd.bubbleSim.enabled or not getgenv().mzd.bubbleSim.blowAndSell then
+            return
+        end
+        
+        local previous = bubblesStat.Value
+        local lastIncreaseTime = tick()
+        
+        while getgenv().mzd.bubbleSim.enabled and 
+              getgenv().mzd.bubbleSim.blowAndSell and 
+              (tick() - lastIncreaseTime < getgenv().mzd.bubbleSim.sellTimeout) do
+            
+            blowBubbles()
+            task.wait(getgenv().mzd.bubbleSim.blowDelay)
+            
+            local current = bubblesStat.Value
+            if current > previous then
+                previous = current
+                lastIncreaseTime = tick()
+            end
+        end
+    end
+    
+    -- Main bubble farming loop
+    task.spawn(function()
+        while true do
+            if getgenv().mzd.bubbleSim.enabled and getgenv().mzd.bubbleSim.blowAndSell then
+                blowUntilFull()
+                remoteEvent:FireServer("SellBubble")
+            end
+            task.wait(0.2)
+        end
+    end)
+    
+    -- Initial coin collection
+    if getgenv().mzd.bubbleSim.collectCoins then
+        collectAllCoins()
+    end
+end)
+
+task.wait(2)
+
+-- Services
+local TweenService = game:GetService("TweenService")
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+
+local player    = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local root      = character:WaitForChild("HumanoidRootPart")
+
+ ------------------------------------------------
+ -- STEP 1: GO TO POSITION
+ ------------------------------------------------
+local targetPosition = Vector3.new(93.0410385131836, 9.194348335266113, 46.90926742553711)
+local walkSpeed     = 30 -- studs per second
+local distance      = (root.Position - targetPosition).Magnitude
+local timeToMove    = distance / walkSpeed
+
+local goTweenInfo = TweenInfo.new(timeToMove, Enum.EasingStyle.Linear)
+local goTween     = TweenService:Create(root, goTweenInfo, {CFrame = CFrame.new(targetPosition)})
+
+-- Tween complete signal
+local tweenFinished = false
+goTween.Completed:Connect(function()
+    tweenFinished = true
+end)
+
+goTween:Play()
+
+ ------------------------------------------------
+ -- STEP 2: WAIT UNTIL ARRIVAL
+ ------------------------------------------------
+while not tweenFinished do
+    RunService.Stepped:Wait()
+end
+
+ ------------------------------------------------
+ -- STEP 3: PAUSE AT ARRIVAL
+ ------------------------------------------------
+task.wait(5)
+
+
+ ------------------------------------------------
+ -- IGLI MF TWEENING LOOP 
+ ------------------------------------------------
+
+-- Function to set CanCollide on all parts
+local function setNoClip(state)
+    for _, part in pairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = not state
+        end
+    end
+end
+
+-- Your bounce loop coordinates
+local startPos = Vector3.new(36, 15973, 42)
+local bounceTarget = Vector3.new(40, 245, 123)
+
+-- Apply start position
+root.CFrame = CFrame.new(startPos)
+
+-- Make sure character doesn't collide
+setNoClip(true)
+
+-- Bounce loop tween
+local bounceInfo = TweenInfo.new(
+    40,
+    Enum.EasingStyle.Sine,
+    Enum.EasingDirection.InOut,
+    -1, -- repeat forever
+    true -- reverse
+)
+local bounceTween = TweenService:Create(root, bounceInfo, {Position = bounceTarget})
+bounceTween:Play()
